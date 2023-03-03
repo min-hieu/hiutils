@@ -7,6 +7,7 @@ import numpy as np
 from typing import Union
 import drjit as dr
 import trimesh
+import pathlib
 
 def np2th(ndarray):
     if isinstance(ndarray, torch.Tensor):
@@ -24,18 +25,18 @@ def get_color(c):
     return np.array(col) / 255
 
 def to_mitsuba_coord(pc):
-    rot_mat = torch.tensor([[1, 0, 0], [0,0,-1], [0,1,0]]).float()
+    rot_mat = np.array([[1, 0, 0], [0,0,-1], [0,1,0]])
     return (pc * 2) @ rot_mat.T
 
 def normalize_points(p, method: str="sphere"):
     if method == "sphere":
-        return _to_unit_sphere(p)
+        return _to_unit_sphere(p).numpy()
     elif method == "cube":
-        return _to_unit_cube(p)
+        return _to_unit_cube(p).numpy()
     else:
         raise AssertionError
 
-def to_unit_sphere(pc: Union[np.ndarray, torch.Tensor]):
+def _to_unit_sphere(pc: Union[np.ndarray, torch.Tensor]):
     """
     pc: [B,N,3] or [N,3]
     """
@@ -50,7 +51,7 @@ def to_unit_sphere(pc: Union[np.ndarray, torch.Tensor]):
     pc = pc.reshape(shapes)
     return pc
 
-def to_unit_cube(pc: Union[np.ndarray, torch.Tensor]):
+def _to_unit_cube(pc: Union[np.ndarray, torch.Tensor]):
     """
     pc: [B,N,3] or [N,3]
     """
@@ -75,9 +76,11 @@ def clean_cache():
     dr.flush_malloc_cache()
     dr.malloc_clear_statistics()
 
-def load_sensor(r, phi, theta):
+def get_sensor(r, phi, theta, res):
     # Apply two rotations to convert from spherical coordinates to world 3D coordinates.
     origin = T.rotate([0, 0, 1], phi).rotate([0, 1, 0], theta) @ mi.ScalarPoint3f([0, 0, r])
+
+    if type(res) == int: res = (res, res)
 
     return mi.load_dict({
         'type': 'perspective',
@@ -93,8 +96,8 @@ def load_sensor(r, phi, theta):
         },
         'film': {
             'type': 'hdrfilm',
-            'width': 512,
-            'height': 512,
+            'width': res[0],
+            'height': res[1],
             'rfilter': {
                 'type': 'box',
             },
@@ -102,30 +105,40 @@ def load_sensor(r, phi, theta):
         },
     })
 
-def get_scene_dict(scene_type="default"):
+def get_scene_dict(scene_type="default", floor=True):
     default_scene = {
         'type': 'scene',
         'integrator': {'type': 'path'},
         'light': {'type': 'constant', 'radiance': 1.0},
-        'floor': {
+    }
+
+    if scene_type == "default":
+        out_scene = default_scene
+    else:
+        out_scene = default_scene
+
+    if floor:
+        out_scene["floor"] = {
             'type': 'rectangle',
             'to_world': T.translate([0, 0, -2]).scale(100),
             'bsdf': {
                 'type': 'diffuse',
                 'reflectance': {'type': 'rgb', 'value': 1.},
             },
-        },
-    }
-    # TODO: add more default scene
-    if scene_type == "default":
-        return default_scene
-    else:
-        return default_scene
+        }
 
-def render_pc(pc, color):
-    scene_dict = get_scene_dict()
+    return out_scene
 
-    for i, pos in enumerate(pc):
+def render_pointcloud(pc, color=0.6, normalize='cube',
+                      transform=lambda x: x,
+                      camR=10, camPhi=45, camTheta=60, camRes=(512,512),
+                      **scene_kwargs):
+    pc = np2th(pc).numpy()
+    scene_dict = get_scene_dict(**scene_kwargs)
+    if normalize is not None: pc = normalize_points(pc, normalize)
+    mit_pc = to_mitsuba_coord(pc) - np.array([-0.25,-0.25,0])
+
+    for i, pos in enumerate(mit_pc):
         scene_dict[f'point_{i}'] = {
             'type': 'sphere',
             'to_world': T.translate(pos).scale(0.05),
@@ -136,7 +149,7 @@ def render_pc(pc, color):
         }
 
     scene = mi.load_dict(scene_dict)
-    sensor = load_sensor(10, 45, 60)
+    sensor = get_sensor(camR, camPhi, camTheta, camRes)
 
     return mi.render(scene, spp=1000, sensor=sensor)
 
@@ -154,12 +167,11 @@ def as_mesh(scene_or_mesh):
         assert(isinstance(mesh, trimesh.Trimesh))
     return mesh
 
-def load_mesh(mesh_path, color):
-    mesh = as_mesh(trimesh.exchange.load.load(mesh_path))
-    trimesh.repair.fix_normals(mesh)
-    v = to_unit_cube(torch.tensor(mesh.vertices))
-    v = to_mitsuba_coord(v).numpy()
-    f = np.array(mesh.faces)
+def dict2mesh(mesh_dict, color, normalize):
+    v = np.array(mesh_dict['vert'])
+    if normalize: v = to_unit_cube(mesh.vertices)
+    v = to_mitsuba_coord(v)
+    f = np.array(mesh_dict['face'])
     mimesh = mi.Mesh(
         "mymesh",
         vertex_count=v.shape[0],
@@ -170,21 +182,42 @@ def load_mesh(mesh_path, color):
     mesh_params = mi.traverse(mimesh)
     mesh_params["vertex_positions"] = np.ravel(v)
     mesh_params["faces"] = np.ravel(f)
-    mesh_params["bsdf.reflectance.value"] = 0.7
+    mesh_params["bsdf.reflectance.value"] = color
     mesh_params.update()
 
     return mimesh
 
-def render_mesh(mesh_path, color):
-    scene = mi.load_dict({
-        'type': 'scene',
-        # The keys below correspond to object IDs and can be chosen arbitrarily
-        'integrator': {'type': 'path'},
-        'light': {'type': 'constant'},
-        'mymesh': load_mesh(mesh_path, color)
-    })
+def load_mesh(mesh_path, color, normalize):
+    mesh = as_mesh(trimesh.exchange.load.load(mesh_path))
+    trimesh.repair.fix_normals(mesh)
+    return mesh.vertices, mesh.faces
 
-    sensor = load_sensor(10, 45, 60)
+def render_mesh(mesh, color=0.6, normalize='cube',
+                transform=lambda x: x,
+                camR=10, camPhi=45, camTheta=60, camRes=(512,512),
+                **scene_kwargs):
+    scene_dict = get_scene_dict(**scene_kwargs)
+
+    if type(mesh) == pathlib.PosixPath or type(mesh) == str:
+        v, f = load_mesh(mesh, color, normalize)
+    elif type(mesh) == dict:
+        v, f = mesh['vert'], mesh['face']
+    elif type(mesh) == trimesh.Trimesh:
+        v, f = mesh.vertices, mesh.faces
+    else:
+        raise Exception('Invalid Mesh Type')
+
+    if normalize is not None:
+        v = normalize_points(transform(v), normalize)
+    else:
+        v = transform(v)
+
+    mesh = {'vert': v,'face': f}
+
+    scene_dict['mesh'] = dict2mesh(mesh, color, normalize)
+    scene = mi.load_dict(scene_dict)
+    sensor = get_sensor(camR, camPhi, camTheta, camRes)
+
     return mi.render(scene, spp=1000, sensor=sensor)
 
 def write_img(img, path):
