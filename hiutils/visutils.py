@@ -183,7 +183,7 @@ def vf2mimesh(v, f, color):
 
     return mimesh
 
-def load_mesh(mesh_path, color, normalize):
+def load_mesh(mesh_path, color):
     mesh = as_mesh(trimesh.exchange.load.load(mesh_path))
     trimesh.repair.fix_normals(mesh)
     return mesh.vertices, mesh.faces
@@ -195,7 +195,7 @@ def render_mesh(mesh, color=0.6, normalize='cube',
     scene_dict = get_scene_dict(**scene_kwargs)
 
     if type(mesh) == pathlib.PosixPath or type(mesh) == str:
-        v, f = load_mesh(mesh, color, normalize)
+        v, f = load_mesh(mesh, color)
     elif type(mesh) == dict:
         v, f = mesh['vert'], mesh['face']
     elif type(mesh) == trimesh.Trimesh:
