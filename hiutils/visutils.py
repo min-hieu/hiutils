@@ -135,10 +135,10 @@ def render_pointcloud(pc, color=0.6, normalize='cube',
                       **scene_kwargs):
     pc = np2th(pc).numpy()
     scene_dict = get_scene_dict(**scene_kwargs)
-    if normalize is not None: pc = normalize_points(pc, normalize)
-    mit_pc = to_mitsuba_coord(pc) - np.array([-0.25,-0.25,0])
 
-    for i, pos in enumerate(mit_pc):
+    if normalize: pc = normalize_points(pc, normalize)
+
+    for i, pos in enumerate(to_mitsuba_coord(transform(pc))):
         scene_dict[f'point_{i}'] = {
             'type': 'sphere',
             'to_world': T.translate(pos).scale(0.05),
@@ -167,11 +167,7 @@ def as_mesh(scene_or_mesh):
         assert(isinstance(mesh, trimesh.Trimesh))
     return mesh
 
-def dict2mesh(mesh_dict, color, normalize):
-    v = np.array(mesh_dict['vert'])
-    if normalize: v = to_unit_cube(mesh.vertices)
-    v = to_mitsuba_coord(v)
-    f = np.array(mesh_dict['face'])
+def vf2mimesh(v, f, color):
     mimesh = mi.Mesh(
         "mymesh",
         vertex_count=v.shape[0],
@@ -204,17 +200,15 @@ def render_mesh(mesh, color=0.6, normalize='cube',
         v, f = mesh['vert'], mesh['face']
     elif type(mesh) == trimesh.Trimesh:
         v, f = mesh.vertices, mesh.faces
+    elif type(mesh) == tuple:
+        v, f = mesh
     else:
         raise Exception('Invalid Mesh Type')
 
-    if normalize is not None:
-        v = normalize_points(transform(v), normalize)
-    else:
-        v = transform(v)
+    if normalize: v = normalize_points(v, normalize)
+    v = to_mitsuba_coord(transform(v))
 
-    mesh = {'vert': v,'face': f}
-
-    scene_dict['mesh'] = dict2mesh(mesh, color, normalize)
+    scene_dict['mesh'] = vf2mimesh(v, f, color)
     scene = mi.load_dict(scene_dict)
     sensor = get_sensor(camR, camPhi, camTheta, camRes)
 
