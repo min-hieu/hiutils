@@ -9,6 +9,17 @@ import drjit as dr
 import trimesh
 import pathlib
 
+def as_numpy(ndarray):
+    if isinstance(ndarray, torch.Tensor):
+        return ndarray.detach().cpu().numpy()
+    elif isinstance(ndarray, np.ndarray):
+        return ndarray
+    elif isinstance(ndarray, list) or isinstance(ndarray, tuple):
+        return np.array(ndarray)
+    else:
+        raise ValueError("Input should be either torch.Tensor or np.ndarray")
+
+
 def np2th(ndarray):
     if isinstance(ndarray, torch.Tensor):
         return ndarray.detach().cpu()
@@ -133,7 +144,7 @@ def render_pointcloud(pc, color=0.6, normalize='cube',
                       transform=lambda x: x,
                       camR=10, camPhi=45, camTheta=60, camRes=(512,512),
                       **scene_kwargs):
-    pc = np2th(pc).numpy()
+    pc = as_numpy(pc)
     scene_dict = get_scene_dict(**scene_kwargs)
 
     if normalize: pc = normalize_points(pc, normalize)
@@ -168,17 +179,21 @@ def as_mesh(scene_or_mesh):
     return mesh
 
 def vf2mimesh(v, f, color):
+    bsdf = mi.load_dict({'type': 'diffuse',
+                         'reflectance': {'type': 'rgb', 'value': color}})
+    props = mi.Properties()
+    props["mesh_bsdf"] = bsdf
     mimesh = mi.Mesh(
         "mymesh",
         vertex_count=v.shape[0],
         face_count=f.shape[0],
         has_vertex_normals=False,
         has_vertex_texcoords=False,
+        props=props
     )
     mesh_params = mi.traverse(mimesh)
     mesh_params["vertex_positions"] = np.ravel(v)
     mesh_params["faces"] = np.ravel(f)
-    mesh_params["bsdf.reflectance.value"] = color
     mesh_params.update()
 
     return mimesh
@@ -186,7 +201,7 @@ def vf2mimesh(v, f, color):
 def load_mesh(mesh_path, color):
     mesh = as_mesh(trimesh.exchange.load.load(mesh_path))
     trimesh.repair.fix_normals(mesh)
-    return mesh.vertices, mesh.faces
+    return np.array(mesh.vertices), np.array(mesh.faces)
 
 def render_mesh(mesh, color=0.6, normalize='cube',
                 transform=lambda x: x,
@@ -199,7 +214,7 @@ def render_mesh(mesh, color=0.6, normalize='cube',
     elif type(mesh) == dict:
         v, f = mesh['vert'], mesh['face']
     elif type(mesh) == trimesh.Trimesh:
-        v, f = mesh.vertices, mesh.faces
+        v, f = np.array(mesh.vertices), np.array(mesh.faces)
     elif type(mesh) == tuple:
         v, f = mesh
     else:
@@ -208,6 +223,7 @@ def render_mesh(mesh, color=0.6, normalize='cube',
     if normalize: v = normalize_points(v, normalize)
     v = to_mitsuba_coord(transform(v))
 
+    assert(type(v) == np.ndarray and type(f) == np.ndarray)
     scene_dict['mesh'] = vf2mimesh(v, f, color)
     scene = mi.load_dict(scene_dict)
     sensor = get_sensor(camR, camPhi, camTheta, camRes)
