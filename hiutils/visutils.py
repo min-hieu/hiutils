@@ -2,12 +2,15 @@ import mitsuba as mi
 mi.set_variant('llvm_ad_rgb')
 
 from mitsuba import ScalarTransform4f as T
+# from mitsuba import ScalarTransform4f, Transform4f
 import torch
 import numpy as np
 from typing import Union
 import drjit as dr
 import trimesh
 import pathlib
+import matplotlib.pyplot as plt
+from pathlib import Path
 
 def as_numpy(ndarray):
     if isinstance(ndarray, torch.Tensor):
@@ -79,6 +82,17 @@ def _to_unit_cube(pc: Union[np.ndarray, torch.Tensor]):
     pc = pc / max_range[..., None]
     pc = pc.reshape(shapes)
     return pc
+
+def get_unit_cube_transform(pc):
+    pc = np2th(pc)
+    shapes = pc.shape
+    N = shapes[-2]
+    pc = pc.reshape(-1,N,3)
+    max_vals = pc.max(1, keepdim=True)[0] #[B,1,3]
+    min_vals = pc.min(1,keepdim=True)[0] #[B,1,3]
+    max_range = (max_vals - min_vals).max(-1)[0] / 2 #[B,1]
+    center = (max_vals + min_vals) / 2 #[B,1,3]
+    return center, max_range
 
 def clean_cache():
     gc.collect()
@@ -152,7 +166,7 @@ def render_pointcloud(pc, color=0.6, normalize='cube',
     for i, pos in enumerate(to_mitsuba_coord(transform(pc))):
         scene_dict[f'point_{i}'] = {
             'type': 'sphere',
-            'to_world': T.translate(pos).scale(0.05),
+            'to_world': mi.Transform4f.translate(pos).scale(0.05),
             'bsdf': {
                 'type': 'diffuse',
                 'reflectance': {'type': 'rgb', 'value': color},
@@ -198,10 +212,59 @@ def vf2mimesh(v, f, color):
 
     return mimesh
 
-def load_mesh(mesh_path, color):
+def read_obj(name: str):
+    verts = []
+    faces = []
+    with open(name, "r") as f:
+        lines = [line.rstrip() for line in f]
+
+        for line in lines:
+            if line.startswith("v "):
+                verts.append(np.float32(line.split()[1:4]))
+            elif line.startswith("f "):
+                faces.append(np.int32([item.split("/")[0] for item in line.split()[1:4]]))
+
+        v = np.vstack(verts)
+        f = np.vstack(faces) - 1
+        return v, f
+
+def load_mesh(mesh_path):
     mesh = as_mesh(trimesh.exchange.load.load(mesh_path))
+    mesh = trimesh.exchange.load.load(mesh_path)
+    # v, f = read_obj(mesh_path)
+    # trimesh.Trimesh(v, f)
     trimesh.repair.fix_normals(mesh)
     return np.array(mesh.vertices), np.array(mesh.faces)
+
+def render_gaussian(gaussians, color=0.6, cmap=None,
+                    transform=lambda x: x,
+                    camR=10, camPhi=45, camTheta=60, camRes=(512,512),
+                    **scene_kwargs):
+
+    scene_dict = get_scene_dict(**scene_kwargs)
+    cmap = plt.get_cmap("plasma")
+
+    gaussians = as_numpy(gaussians)
+    N = gaussians.shape[0]
+    v_list = []
+    f_list = []
+    for i, g in enumerate(gaussians):
+        mu, eivec, eival = g[:3], g[3:12], g[13:]
+
+        R = eivec.reshape(3, 3).T
+        S = np.sqrt(np.clip(eival, 1e-4, 99999)) * 0.5
+
+        v, f = load_mesh(Path(__file__).parent / "objs/sphere.obj")
+        v = mu + ((v * S) @ R.T)
+        v = to_mitsuba_coord(v) * 1.2
+        mesh = trimesh.Trimesh(vertices=v, faces=f)
+        mesh.fix_normals()
+        v, f = np.array(mesh.vertices), np.array(mesh.faces)
+        scene_dict[f'point_{i}'] = vf2mimesh(v, f, 0.45)
+
+    scene = mi.load_dict(scene_dict)
+    sensor = get_sensor(camR, camPhi, camTheta, camRes)
+    return mi.render(scene, spp=1000, sensor=sensor)
 
 def render_mesh(mesh, color=0.6, normalize='cube',
                 transform=lambda x: x,
@@ -210,7 +273,7 @@ def render_mesh(mesh, color=0.6, normalize='cube',
     scene_dict = get_scene_dict(**scene_kwargs)
 
     if type(mesh) == pathlib.PosixPath or type(mesh) == str:
-        v, f = load_mesh(mesh, color)
+        v, f = load_mesh(mesh)
     elif type(mesh) == dict:
         v, f = mesh['vert'], mesh['face']
     elif type(mesh) == trimesh.Trimesh:
