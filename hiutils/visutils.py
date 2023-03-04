@@ -101,34 +101,27 @@ def clean_cache():
     dr.flush_malloc_cache()
     dr.malloc_clear_statistics()
 
-def get_sensor(r, phi, theta, res):
+def get_sensor(r, phi, theta, res, camType='perspective'):
     # Apply two rotations to convert from spherical coordinates to world 3D coordinates.
     origin = T.rotate([0, 0, 1], phi).rotate([0, 1, 0], theta) @ mi.ScalarPoint3f([0, 0, r])
 
     if type(res) == int: res = (res, res)
 
-    return mi.load_dict({
-        'type': 'perspective',
-        'fov': 39.3077,
-        'to_world': T.look_at(
-            origin=origin,
-            target=[0, 0, 0],
-            up=[0, 0, 1]
-        ),
-        'sampler': {
-            'type': 'independent',
-            'sample_count': 16
-        },
+    cam_dict = {
+        'type': camType,
+        'to_world': T.look_at(origin=origin, target=[0, 0, 0], up=[0, 0, 1]),
+        'sampler': {'type': 'independent','sample_count': 16},
         'film': {
             'type': 'hdrfilm',
-            'width': res[0],
-            'height': res[1],
-            'rfilter': {
-                'type': 'box',
-            },
+            'width': res[0],'height': res[1],
+            'rfilter': {'type': 'box',},
             'pixel_format': 'rgb',
         },
-    })
+    }
+
+    if camType == 'perspective': cam_dict['fov'] = 39.3077
+
+    return mi.load_dict(cam_dict)
 
 def get_scene_dict(scene_type="default", floor=True):
     default_scene = {
@@ -156,7 +149,7 @@ def get_scene_dict(scene_type="default", floor=True):
 
 def render_pointcloud(pc, color=0.6, normalize='cube',
                       transform=lambda x: x,
-                      camR=10, camPhi=45, camTheta=60, camRes=(512,512),
+                      camR=10, camPhi=45, camTheta=60, camRes=(512,512), camType='perspective',
                       **scene_kwargs):
     pc = as_numpy(pc)
     scene_dict = get_scene_dict(**scene_kwargs)
@@ -166,7 +159,7 @@ def render_pointcloud(pc, color=0.6, normalize='cube',
     for i, pos in enumerate(to_mitsuba_coord(transform(pc))):
         scene_dict[f'point_{i}'] = {
             'type': 'sphere',
-            'to_world': mi.Transform4f.translate(pos).scale(0.05),
+            'to_world': T.translate(pos).scale(0.05),
             'bsdf': {
                 'type': 'diffuse',
                 'reflectance': {'type': 'rgb', 'value': color},
@@ -174,7 +167,7 @@ def render_pointcloud(pc, color=0.6, normalize='cube',
         }
 
     scene = mi.load_dict(scene_dict)
-    sensor = get_sensor(camR, camPhi, camTheta, camRes)
+    sensor = get_sensor(camR, camPhi, camTheta, camRes, camType)
 
     return mi.render(scene, spp=1000, sensor=sensor)
 
@@ -212,6 +205,32 @@ def vf2mimesh(v, f, color):
 
     return mimesh
 
+def vf2bbox(v, f, color):
+    bsdf = mi.load_dict({
+        'type': 'roughdielectric',
+        'distribution': 'beckmann',
+        'alpha': 0.7,
+        'int_ior': 'bk7',
+        'ext_ior': 'air',
+        'specular_reflectance': {'type': 'rgb', 'value': color}
+        })
+    props = mi.Properties()
+    props["mesh_bsdf"] = bsdf
+    mimesh = mi.Mesh(
+        "mybbox",
+        vertex_count=v.shape[0],
+        face_count=f.shape[0],
+        has_vertex_normals=False,
+        has_vertex_texcoords=False,
+        props=props
+    )
+    mesh_params = mi.traverse(mimesh)
+    mesh_params["vertex_positions"] = np.ravel(v)
+    mesh_params["faces"] = np.ravel(f)
+    mesh_params.update()
+
+    return mimesh
+
 def read_obj(name: str):
     verts = []
     faces = []
@@ -228,17 +247,25 @@ def read_obj(name: str):
         f = np.vstack(faces) - 1
         return v, f
 
-def load_mesh(mesh_path):
-    mesh = as_mesh(trimesh.exchange.load.load(mesh_path))
-    mesh = trimesh.exchange.load.load(mesh_path)
-    # v, f = read_obj(mesh_path)
-    # trimesh.Trimesh(v, f)
-    trimesh.repair.fix_normals(mesh)
-    return np.array(mesh.vertices), np.array(mesh.faces)
+def load_mesh(mesh):
+    if type(mesh) == pathlib.PosixPath or type(mesh) == str:
+        tmesh = as_mesh(trimesh.exchange.load.load(mesh))
+        trimesh.repair.fix_normals(tmesh)
+        v, f = np.array(tmesh.vertices), np.array(tmesh.faces)
+    elif type(mesh) == dict:
+        v, f = mesh['vert'], mesh['face']
+    elif type(mesh) == trimesh.Trimesh:
+        v, f = np.array(mesh.vertices), np.array(mesh.faces)
+    elif type(mesh) == tuple:
+        v, f = mesh
+    else:
+        raise Exception('Invalid Mesh Type')
+
+    return v, f
 
 def render_gaussian(gaussians, color=0.6, cmap=None,
                     transform=lambda x: x,
-                    camR=10, camPhi=45, camTheta=60, camRes=(512,512),
+                    camR=10, camPhi=45, camTheta=60, camRes=(512,512), camType='perspective',
                     **scene_kwargs):
 
     scene_dict = get_scene_dict(**scene_kwargs)
@@ -263,7 +290,7 @@ def render_gaussian(gaussians, color=0.6, cmap=None,
         scene_dict[f'point_{i}'] = vf2mimesh(v, f, 0.45)
 
     scene = mi.load_dict(scene_dict)
-    sensor = get_sensor(camR, camPhi, camTheta, camRes)
+    sensor = get_sensor(camR, camPhi, camTheta, camRes, camType)
     return mi.render(scene, spp=1000, sensor=sensor)
 
 def render_mesh(mesh, color=0.6, normalize='cube',
@@ -272,22 +299,50 @@ def render_mesh(mesh, color=0.6, normalize='cube',
                 **scene_kwargs):
     scene_dict = get_scene_dict(**scene_kwargs)
 
-    if type(mesh) == pathlib.PosixPath or type(mesh) == str:
-        v, f = load_mesh(mesh)
-    elif type(mesh) == dict:
-        v, f = mesh['vert'], mesh['face']
-    elif type(mesh) == trimesh.Trimesh:
-        v, f = np.array(mesh.vertices), np.array(mesh.faces)
-    elif type(mesh) == tuple:
-        v, f = mesh
-    else:
-        raise Exception('Invalid Mesh Type')
+    v, f = load_mesh(mesh)
 
     if normalize: v = normalize_points(v, normalize)
     v = to_mitsuba_coord(transform(v))
 
     assert(type(v) == np.ndarray and type(f) == np.ndarray)
     scene_dict['mesh'] = vf2mimesh(v, f, color)
+    scene = mi.load_dict(scene_dict)
+    sensor = get_sensor(camR, camPhi, camTheta, camRes)
+
+    return mi.render(scene, spp=1000, sensor=sensor)
+
+def render_mesh_bbox(mesh, bbox, pc=None, mesh_color=0.6, normalize='cube',
+                bbox_color = np.array([0.53 , 0.68 , 0.92]),
+                transform=lambda x: x,
+                camR=10, camPhi=45, camTheta=60, camRes=(512,512),
+                **scene_kwargs):
+    scene_dict = get_scene_dict(**scene_kwargs)
+
+    v, f = load_mesh(mesh)
+    if normalize is not None: v = normalize_points(v, normalize)
+    v = to_mitsuba_coord(transform(v))
+
+    # bounding box mesh
+    bv, bf = load_mesh(Path(__file__).parent / "objs/cube.obj")
+    minbb, maxbb = bbox
+    transbb = (maxbb + minbb) / 2
+    scalebb = (maxbb - minbb) / 2
+    bv = (bv * scalebb) + transbb
+    bv = to_mitsuba_coord(transform(bv))
+
+    if pc is not None:
+        for i, pos in enumerate(to_mitsuba_coord(transform(pc))):
+            scene_dict[f'point_{i}'] = {
+                'type': 'sphere',
+                'to_world': T.translate(pos).scale(0.05),
+                'bsdf': {
+                    'type': 'diffuse',
+                    'reflectance': {'type': 'rgb', 'value': 0.45},
+                }
+            }
+
+    scene_dict['mesh'] = vf2mimesh(v, f, mesh_color)
+    scene_dict['bbox'] = vf2bbox(bv, bf, bbox_color)
     scene = mi.load_dict(scene_dict)
     sensor = get_sensor(camR, camPhi, camTheta, camRes)
 
