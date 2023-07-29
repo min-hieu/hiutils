@@ -1,3 +1,4 @@
 build
 *.egg-info
 hiutils/__pycache__
+.DS_Store
