@@ -1,8 +1,5 @@
 import mitsuba as mi
-mi.set_variant('llvm_ad_rgb')
-
 from mitsuba import ScalarTransform4f as T
-# from mitsuba import ScalarTransform4f, Transform4f
 import torch
 import numpy as np
 from typing import Union

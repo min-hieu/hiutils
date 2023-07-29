@@ -14,4 +14,3 @@ def wrapbar(title, total, callback):
         task = progress.add_task(f"[green]{title}", total=total)
         while not progress.finished:
             progress.update(task, completed=callback)
-
