@@ -1,8 +1,8 @@
 from setuptools import setup
 
 setup(
-    name="hiutils",
+    name="hiutil",
     version=0.3,
-    packages=["hiutils"],
+    packages=["hiutil"],
     zip_safe=False,
 )
