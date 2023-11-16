@@ -2,7 +2,7 @@ from setuptools import setup
 
 setup(
     name="hiutil",
-    version=0.3,
+    version=1.0,
     packages=["hiutil"],
     zip_safe=False,
 )
